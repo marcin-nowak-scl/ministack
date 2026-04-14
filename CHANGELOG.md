@@ -9,6 +9,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Lambda Runtime API noise** — suppressed `BrokenPipeError` tracebacks from Lambda binaries disconnecting after reading the event. This is benign and expected behavior during native `provided` runtime execution.
+- **RDS Data API warning spam** — the `pymysql` import warning is now logged once per process instead of on every `ExecuteStatement` call.
 ### Added
 - **SFN Wait state scaling** — new `SFN_WAIT_SCALE` environment variable (default `1.0`) scales Wait state durations and retry interval sleeps. Set to `0` to skip all waits for fast-forward execution in test scenarios where emulated resources are immediately available. Contributed by @jayjanssen
 
@@ -21,7 +24,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **RDS DbiResourceId lookup** — `DescribeDBInstances` and other instance actions now accept `DbiResourceId` (e.g. `db-1AD581BD3647411AACBF`) in addition to the friendly `DBInstanceIdentifier`. Fixes Terraform/OpenTofu state refresh failures. Contributed by @alexanderkrum-next (#305)
 
 ---
-
 ## [1.2.10] — 2026-04-13
 
 ### Added
