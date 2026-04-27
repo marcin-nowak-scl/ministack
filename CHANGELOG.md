@@ -9,6 +9,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **API Gateway (HTTP API and REST): JWT authorizers, HTTP proxy integrations, and non-blocking I/O** — HTTP API (`apigateway`) and REST API (`apigateway_v1`): enforce JWT `issuer` + `audience` validation against a JWKS URL, request/response **parameter mapping** for `HTTP` / `HTTP_PROXY` integrations, and `ministack.core.nonblocking_http` so upstream proxy and JWKS work does not block the event loop. Operator tuning: `MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS` (default `30`), `MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS` (default `5`).
+
 ---
 
 ## [1.3.18] — 2026-04-28
@@ -55,7 +58,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SNS → SQS raw delivery did not forward message attributes** — raw subscriptions delivered the message body but stripped `MessageAttributes`, so SQS receivers never saw them. Forwarded now, plus the follow-up that adds the matching `MD5OfMessageAttributes` header so Java / Go SDK receivers (which verify the digest) match real AWS. Contributed by @arischow.
 - **Three medium / low correctness bugs.** `apigateway` and `apigateway_v1` `get_state()` returned live `AccountScopedDict` references instead of deep copies, so a concurrent write during shutdown serialisation could corrupt the persisted snapshot. `secretsmanager._delete_secret(force=True)` deleted the secret but left orphan entries in `_resource_policies` keyed by ARN — invisible to the API but accumulating in memory and surviving warm-boot. `acm._list_certificates` returned `{"NextToken": null}` unconditionally — boto3 strips it client-side, but Java / Go / raw-HTTP pagination clients that loop on `if NextToken in response` looped forever. Contributed by @bognari. Pattern extended in this release with a sweep across `ses_v2`, `apigateway` v2, and `apigateway` v1 (ten more endpoints) so every list response now omits `NextToken` when there is no next page; AppSync's GraphQL `{items, nextToken}` shape is intentionally unchanged.
 - **`/health` reported `version: dev` in the published Docker image** — `pip` is stripped from the runtime image, so the `importlib.metadata` lookup that worked under `pip install ministack` returned the fallback. Now reads from a `MINISTACK_VERSION` env var injected at image build time.
-
 
 ---
 ## [1.3.15] — 2026-04-26
