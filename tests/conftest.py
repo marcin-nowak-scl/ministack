@@ -346,3 +346,7 @@ def scheduler():
 @pytest.fixture(scope="session")
 def tagging():
     return make_client("resourcegroupstaggingapi")
+
+@pytest.fixture(scope="session")
+def opensearch():
+    return make_client("opensearch")
