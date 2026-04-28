@@ -18,6 +18,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - ARNs use `arn:aws:es:<region>:<account>:domain/<name>`; name validation and `ResourceAlreadyExistsException` match AWS.
   - **Tests** — `tests/test_opensearch.py` matches the `aws_opensearch_domain` wire shape; optional data-plane test with `OPENSEARCH_DATAPLANE=1` (cluster health, index, search).
 
+### Fixed
+- **Lambda Docker executor: network auto-detect, default `AWS_ENDPOINT_URL`, AppSync vhost DNS, and Linux `host.docker.internal`** — sibling Lambda containers spawned by the Docker executor now (a) auto-attach to MiniStack's own Docker network when `LAMBDA_DOCKER_NETWORK` / `DOCKER_NETWORK` are unset (`get_ministack_network()` inspects the MiniStack container); (b) get a synthesized `AWS_ENDPOINT_URL` when none is supplied — process env > function env > `LOCALSTACK_HOSTNAME` > `http://<MINISTACK_HOST or host.docker.internal>:<GATEWAY_PORT|EDGE_PORT|4566>` — so the in-function AWS SDK never falls back to public AWS with the dummy credentials; (c) get MiniStack's IP prepended to their `dns` list when the wildcard DNS resolver is active so `{apiId}.appsync-api.*` vhosts resolve back to MiniStack on the same Docker network; (d) get `host.docker.internal:host-gateway` added to `extra_hosts` only when the resolved endpoint actually uses that hostname (plain Linux Docker; Docker Desktop already injects the name). `LAMBDA_DOCKER_FLAGS --add-host` still wins. Required for OpenSearch, AppSync Events, and any sibling-container service.
+
 ---
 
 ## [1.3.18] — 2026-04-28
