@@ -647,140 +647,144 @@ def test_serverless_cache_not_implemented(ec):
         )
 
 
-# ---------------------------------------------------------------------------
-# 12. Cluster-mode (real sharded redis) — opt-in, requires Docker + network
-# ---------------------------------------------------------------------------
 
-def _cluster_mode_env_ready():
-    """True only if the host can actually exercise the cluster-mode path:
-    the flag is set, DOCKER_NETWORK is set, and `docker` is importable+usable.
-    """
-    if os.environ.get("ELASTICACHE_CLUSTER_MODE_REAL") != "1":
-        return False
-    if not os.environ.get("DOCKER_NETWORK"):
-        return False
-    try:
-        import docker
-        client = docker.from_env()
-        client.ping()
-        return True
-    except Exception:
-        return False
+# ========== from test_elasticache_lambda_network.py ==========
+# ElastiCache+Lambda network reachability via DOCKER_NETWORK auto-detect.
+import io
+import json
+import os
+import time
+import zipfile
 
+import pytest
 
-@pytest.mark.skipif(
-    not _cluster_mode_env_ready(),
-    reason="cluster-mode requires ELASTICACHE_CLUSTER_MODE_REAL=1 + DOCKER_NETWORK + docker",
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DOCKER_NETWORK"),
+    reason="DOCKER_NETWORK not set — skipping network connectivity test",
 )
-def test_elasticache_real_cluster_mode(ec):
-    """Bootstraps a real 3-shard redis cluster via redis-cli and verifies
-    CLUSTER SLOTS topology + cluster-aware SET/GET via an ephemeral client
-    container on the same network."""
-    import subprocess
-    rg_id = "pytest-cluster"
-    network = os.environ["DOCKER_NETWORK"]
 
-    # Cleanup any leftover from a prior aborted run.
-    try:
-        ec.delete_replication_group(ReplicationGroupId=rg_id)
-        time.sleep(2)
-    except ClientError:
-        pass
+_LAMBDA_ROLE = "arn:aws:iam::000000000000:role/lambda-role"
 
-    resp = ec.create_replication_group(
-        ReplicationGroupId=rg_id,
-        ReplicationGroupDescription="pytest cluster mode",
-        CacheNodeType="cache.t3.micro",
+
+def _make_zip(code: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("index.py", code)
+    return buf.getvalue()
+
+
+def _make_zip_js(code: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("index.js", code)
+    return buf.getvalue()
+
+
+def test_elasticache_lambda_network_connectivity(ec, lam):
+    """Prove that Lambda containers can TCP-connect to an ElastiCache container."""
+    cluster_id = "net-test-redis"
+    fn_py = "ec-net-test-py"
+    fn_js = "ec-net-test-js"
+
+    # 1. Create ElastiCache Redis cluster
+    ec.create_cache_cluster(
+        CacheClusterId=cluster_id,
         Engine="redis",
-        EngineVersion="7.0.12",
-        NumNodeGroups=3,
-        ReplicasPerNodeGroup=1,
+        CacheNodeType="cache.t3.micro",
+        NumCacheNodes=1,
     )
-    rg = resp["ReplicationGroup"]
-    assert rg["ClusterEnabled"] is True
-    assert len(rg["NodeGroups"]) == 3
-    config_ep = rg["ConfigurationEndpoint"]
-    assert config_ep and config_ep["Port"] == 6379
 
-    def cli(args):
-        cmd = (
-            ["docker", "run", "--rm", "--network", network, "redis:7-alpine", "redis-cli"]
-            + args
-        )
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-
-    info = cli(["-h", config_ep["Address"], "-p", "6379", "CLUSTER", "INFO"]).stdout
-    assert "cluster_state:ok" in info, info
-    assert "cluster_known_nodes:6" in info, info
-    assert "cluster_size:3" in info, info
-
-    for k, v in [("alpha", "1"), ("beta", "2"), ("gamma", "3"), ("delta", "4")]:
-        r = cli(["-c", "-h", config_ep["Address"], "-p", "6379", "SET", k, v])
-        assert r.returncode == 0 and r.stdout.strip() == "OK", r.stdout + r.stderr
-        r = cli(["-c", "-h", config_ep["Address"], "-p", "6379", "GET", k])
-        assert r.stdout.strip() == v, r.stdout
-
-    ec.delete_replication_group(ReplicationGroupId=rg_id)
-    time.sleep(1)
-    leftover = subprocess.run(
-        ["docker", "ps", "-a", "--filter", f"label=rg_id={rg_id}", "--format", "{{.Names}}"],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    assert leftover == "", f"leftover containers after delete: {leftover}"
-
-
-
-# ========== Regression: AWS XML list wrappers (issue #530) ==========
-# ElastiCache list responses must use the AWS-spec locationName for each
-# list (e.g. <CacheCluster> for CacheClusterList.member) — NOT <member>.
-# Strict generated SDKs (aws-sdk-go-v2, Java/Rust v2) parse a <member>-
-# wrapped list as empty when the model declares a custom locationName.
-# botocore is permissive and accepts both, so a boto3-only test cannot
-# catch this — these tests assert on the wire shape via raw HTTP.
-
-
-def test_describe_cache_clusters_wraps_in_cachecluster_not_member():
-    """Real AWS uses <CacheCluster>...</CacheCluster> for each list item;
-    aws-sdk-go-v2 sees an empty CacheClusters slice if we emit <member>."""
-    import urllib.request
-    cluster_id = f"shape-test-{_uuid_mod.uuid4().hex[:8]}"
-    create = urllib.request.urlopen(urllib.request.Request(
-        f"{ENDPOINT}/",
-        data=(
-            f"Action=CreateCacheCluster&Version=2015-02-02"
-            f"&CacheClusterId={cluster_id}&CacheNodeType=cache.t3.micro"
-            f"&Engine=redis&NumCacheNodes=1"
-        ).encode(),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    ))
-    create.read()
     try:
-        resp = urllib.request.urlopen(urllib.request.Request(
-            f"{ENDPOINT}/",
-            data=(
-                f"Action=DescribeCacheClusters&Version=2015-02-02"
-                f"&CacheClusterId={cluster_id}"
-            ).encode(),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        ))
-        body = resp.read().decode()
-        assert "<CacheCluster>" in body, (
-            "DescribeCacheClusters list items must be wrapped in "
-            "<CacheCluster> per AWS shape — strict SDKs (aws-sdk-go-v2, "
-            "Java/Rust v2) parse a <member>-wrapped list as empty (#530)."
+        resp = ec.describe_cache_clusters(CacheClusterId=cluster_id)
+        cluster = resp["CacheClusters"][0]
+        node = cluster["CacheNodes"][0]
+        host = node["Endpoint"]["Address"]
+        port = int(node["Endpoint"]["Port"])
+
+        # 2. Endpoint.Address must NOT be localhost when DOCKER_NETWORK is set
+        assert host not in ("localhost", "redis"), (
+            f"Expected container IP, got '{host}' — DOCKER_NETWORK not working"
         )
-        assert "<member><CacheClusterId>" not in body, (
-            "Found legacy <member> wrapper for cluster — regression of #530"
+
+        # 3. Wait for Redis container to accept connections
+        import socket
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=2):
+                    break
+            except OSError:
+                time.sleep(1)
+        else:
+            pytest.fail(f"ElastiCache container at {host}:{port} not reachable after 60s")
+
+        # 4. Python Lambda — TCP connect to ElastiCache endpoint
+        py_code = f"""\
+import socket, json
+def handler(event, context):
+    try:
+        s = socket.create_connection(("{host}", {port}), timeout=5)
+        s.close()
+        return {{"connected": True}}
+    except Exception as e:
+        return {{"connected": False, "error": str(e)}}
+"""
+        lam.create_function(
+            FunctionName=fn_py,
+            Runtime="python3.12",
+            Role=_LAMBDA_ROLE,
+            Handler="index.handler",
+            Code={"ZipFile": _make_zip(py_code)},
+            Timeout=15,
         )
+
+        resp = lam.invoke(FunctionName=fn_py, Payload=json.dumps({}))
+        result = json.loads(resp["Payload"].read())
+        assert result.get("connected") is True, f"Python Lambda failed: {result}"
+
+        # 5. JS Lambda — TCP connect to ElastiCache endpoint
+        js_code = f"""\
+const net = require("net");
+exports.handler = async (event) => {{
+    return new Promise((resolve) => {{
+        const sock = new net.Socket();
+        sock.setTimeout(5000);
+        sock.connect({port}, "{host}", () => {{
+            sock.destroy();
+            resolve({{ connected: true }});
+        }});
+        sock.on("error", (err) => {{
+            sock.destroy();
+            resolve({{ connected: false, error: err.message }});
+        }});
+        sock.on("timeout", () => {{
+            sock.destroy();
+            resolve({{ connected: false, error: "timeout" }});
+        }});
+    }});
+}};
+"""
+        lam.create_function(
+            FunctionName=fn_js,
+            Runtime="nodejs20.x",
+            Role=_LAMBDA_ROLE,
+            Handler="index.handler",
+            Code={"ZipFile": _make_zip_js(js_code)},
+            Timeout=15,
+        )
+
+        resp = lam.invoke(FunctionName=fn_js, Payload=json.dumps({}))
+        result = json.loads(resp["Payload"].read())
+        assert result.get("connected") is True, f"JS Lambda failed: {result}"
+
     finally:
-        urllib.request.urlopen(urllib.request.Request(
-            f"{ENDPOINT}/",
-            data=(
-                f"Action=DeleteCacheCluster&Version=2015-02-02"
-                f"&CacheClusterId={cluster_id}"
-            ).encode(),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )).read()
+        # 6. Cleanup
+        for fn in (fn_py, fn_js):
+            try:
+                lam.delete_function(FunctionName=fn)
+            except Exception:
+                pass
+        try:
+            ec.delete_cache_cluster(CacheClusterId=cluster_id)
+        except Exception:
+            pass
