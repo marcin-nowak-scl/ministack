@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
+ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+
 
 def test_elasticache_create(ec):
     ec.create_cache_cluster(
@@ -644,3 +646,141 @@ def test_serverless_cache_not_implemented(ec):
             Engine="redis",
         )
 
+
+# ---------------------------------------------------------------------------
+# 12. Cluster-mode (real sharded redis) — opt-in, requires Docker + network
+# ---------------------------------------------------------------------------
+
+def _cluster_mode_env_ready():
+    """True only if the host can actually exercise the cluster-mode path:
+    the flag is set, DOCKER_NETWORK is set, and `docker` is importable+usable.
+    """
+    if os.environ.get("ELASTICACHE_CLUSTER_MODE_REAL") != "1":
+        return False
+    if not os.environ.get("DOCKER_NETWORK"):
+        return False
+    try:
+        import docker
+        client = docker.from_env()
+        client.ping()
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(
+    not _cluster_mode_env_ready(),
+    reason="cluster-mode requires ELASTICACHE_CLUSTER_MODE_REAL=1 + DOCKER_NETWORK + docker",
+)
+def test_elasticache_real_cluster_mode(ec):
+    """Bootstraps a real 3-shard redis cluster via redis-cli and verifies
+    CLUSTER SLOTS topology + cluster-aware SET/GET via an ephemeral client
+    container on the same network."""
+    import subprocess
+    rg_id = "pytest-cluster"
+    network = os.environ["DOCKER_NETWORK"]
+
+    # Cleanup any leftover from a prior aborted run.
+    try:
+        ec.delete_replication_group(ReplicationGroupId=rg_id)
+        time.sleep(2)
+    except ClientError:
+        pass
+
+    resp = ec.create_replication_group(
+        ReplicationGroupId=rg_id,
+        ReplicationGroupDescription="pytest cluster mode",
+        CacheNodeType="cache.t3.micro",
+        Engine="redis",
+        EngineVersion="7.0.12",
+        NumNodeGroups=3,
+        ReplicasPerNodeGroup=1,
+    )
+    rg = resp["ReplicationGroup"]
+    assert rg["ClusterEnabled"] is True
+    assert len(rg["NodeGroups"]) == 3
+    config_ep = rg["ConfigurationEndpoint"]
+    assert config_ep and config_ep["Port"] == 6379
+
+    def cli(args):
+        cmd = (
+            ["docker", "run", "--rm", "--network", network, "redis:7-alpine", "redis-cli"]
+            + args
+        )
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+    info = cli(["-h", config_ep["Address"], "-p", "6379", "CLUSTER", "INFO"]).stdout
+    assert "cluster_state:ok" in info, info
+    assert "cluster_known_nodes:6" in info, info
+    assert "cluster_size:3" in info, info
+
+    for k, v in [("alpha", "1"), ("beta", "2"), ("gamma", "3"), ("delta", "4")]:
+        r = cli(["-c", "-h", config_ep["Address"], "-p", "6379", "SET", k, v])
+        assert r.returncode == 0 and r.stdout.strip() == "OK", r.stdout + r.stderr
+        r = cli(["-c", "-h", config_ep["Address"], "-p", "6379", "GET", k])
+        assert r.stdout.strip() == v, r.stdout
+
+    ec.delete_replication_group(ReplicationGroupId=rg_id)
+    time.sleep(1)
+    leftover = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"label=rg_id={rg_id}", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert leftover == "", f"leftover containers after delete: {leftover}"
+
+
+
+# ========== Regression: AWS XML list wrappers (issue #530) ==========
+# ElastiCache list responses must use the AWS-spec locationName for each
+# list (e.g. <CacheCluster> for CacheClusterList.member) — NOT <member>.
+# Strict generated SDKs (aws-sdk-go-v2, Java/Rust v2) parse a <member>-
+# wrapped list as empty when the model declares a custom locationName.
+# botocore is permissive and accepts both, so a boto3-only test cannot
+# catch this — these tests assert on the wire shape via raw HTTP.
+
+
+def test_describe_cache_clusters_wraps_in_cachecluster_not_member():
+    """Real AWS uses <CacheCluster>...</CacheCluster> for each list item;
+    aws-sdk-go-v2 sees an empty CacheClusters slice if we emit <member>."""
+    import urllib.request
+    cluster_id = f"shape-test-{_uuid_mod.uuid4().hex[:8]}"
+    create = urllib.request.urlopen(urllib.request.Request(
+        f"{ENDPOINT}/",
+        data=(
+            f"Action=CreateCacheCluster&Version=2015-02-02"
+            f"&CacheClusterId={cluster_id}&CacheNodeType=cache.t3.micro"
+            f"&Engine=redis&NumCacheNodes=1"
+        ).encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    ))
+    create.read()
+    try:
+        resp = urllib.request.urlopen(urllib.request.Request(
+            f"{ENDPOINT}/",
+            data=(
+                f"Action=DescribeCacheClusters&Version=2015-02-02"
+                f"&CacheClusterId={cluster_id}"
+            ).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        ))
+        body = resp.read().decode()
+        assert "<CacheCluster>" in body, (
+            "DescribeCacheClusters list items must be wrapped in "
+            "<CacheCluster> per AWS shape — strict SDKs (aws-sdk-go-v2, "
+            "Java/Rust v2) parse a <member>-wrapped list as empty (#530)."
+        )
+        assert "<member><CacheClusterId>" not in body, (
+            "Found legacy <member> wrapper for cluster — regression of #530"
+        )
+    finally:
+        urllib.request.urlopen(urllib.request.Request(
+            f"{ENDPOINT}/",
+            data=(
+                f"Action=DeleteCacheCluster&Version=2015-02-02"
+                f"&CacheClusterId={cluster_id}"
+            ).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )).read()
