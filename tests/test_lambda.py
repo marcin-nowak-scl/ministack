@@ -3042,6 +3042,104 @@ def test_lambda_docker_flags_applied_to_run_kwargs(monkeypatch):
     assert "unknown_flag" not in captured
 
 
+def _lambda_spawn_run_kwargs(monkeypatch, *, auto_endpoint=False, auto_network=False, **env):
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+    monkeypatch.setattr(lsvc, "LAMBDA_AUTO_AWS_ENDPOINT_URL", auto_endpoint)
+    monkeypatch.setattr(lsvc, "LAMBDA_AUTO_DOCKER_NETWORK", auto_network)
+    monkeypatch.setattr(lsvc, "LAMBDA_DOCKER_FLAGS", "")
+    monkeypatch.setattr(lsvc, "LAMBDA_DOCKER_NETWORK", "")
+    monkeypatch.setattr(lsvc, "_docker_available", True)
+    monkeypatch.setattr(lsvc, "_running_in_container", lambda: False)
+
+    captured = {}
+    fake_container = _mk_container()
+    fake_container.ports = {"8080/tcp": [{"HostPort": "9999"}]}
+
+    def _fake_run(**kwargs):
+        captured.update(kwargs)
+        return fake_container
+
+    fake_client = MagicMock()
+    fake_client.containers.run = _fake_run
+    fake_client.images.get = MagicMock()
+    monkeypatch.setattr(lsvc, "_get_docker_client", lambda: fake_client)
+
+    lsvc._spawn_lambda_container(
+        {
+            "FunctionName": "test-fn",
+            "Runtime": "python3.12",
+            "Handler": "index.handler",
+            "PackageType": "Zip",
+            "Timeout": 3,
+            "MemorySize": 128,
+        },
+        _make_zip("def handler(e, c): pass"),
+    )
+    return captured, fake_client
+
+
+def test_lambda_auto_endpoint_url_default_off(monkeypatch):
+    captured, _fake_client = _lambda_spawn_run_kwargs(
+        monkeypatch,
+        AWS_ENDPOINT_URL=None,
+        MINISTACK_HOST=None,
+        GATEWAY_PORT=None,
+        EDGE_PORT=None,
+    )
+
+    assert "AWS_ENDPOINT_URL" not in captured["environment"]
+    assert "extra_hosts" not in captured
+
+
+def test_lambda_auto_endpoint_url_opt_in_uses_host_docker_internal(monkeypatch):
+    captured, _fake_client = _lambda_spawn_run_kwargs(
+        monkeypatch,
+        auto_endpoint=True,
+        AWS_ENDPOINT_URL=None,
+        MINISTACK_HOST=None,
+        GATEWAY_PORT=None,
+        EDGE_PORT=None,
+    )
+
+    assert captured["environment"]["AWS_ENDPOINT_URL"] == "http://host.docker.internal:4566"
+    assert captured["extra_hosts"] == {"host.docker.internal": "host-gateway"}
+
+
+def test_lambda_auto_endpoint_url_opt_in_uses_ministack_host(monkeypatch):
+    captured, _fake_client = _lambda_spawn_run_kwargs(
+        monkeypatch,
+        auto_endpoint=True,
+        AWS_ENDPOINT_URL=None,
+        MINISTACK_HOST="ministack",
+        GATEWAY_PORT="4577",
+        EDGE_PORT=None,
+    )
+
+    assert captured["environment"]["AWS_ENDPOINT_URL"] == "http://ministack:4577"
+    assert "extra_hosts" not in captured
+
+
+def test_lambda_auto_docker_network_default_off(monkeypatch):
+    get_network = MagicMock(return_value="compose_default")
+    monkeypatch.setattr(lsvc, "_get_ministack_network", get_network)
+    captured, fake_client = _lambda_spawn_run_kwargs(monkeypatch)
+    fake_client.containers.get.assert_not_called()
+    get_network.assert_not_called()
+    assert "network" not in captured
+
+
+def test_lambda_auto_docker_network_opt_in(monkeypatch):
+    monkeypatch.setattr(lsvc, "_get_ministack_network", lambda _client: "compose_default")
+    captured, _fake_client = _lambda_spawn_run_kwargs(monkeypatch, auto_network=True)
+
+    assert captured["network"] == "compose_default"
+
+
 def test_lambda_filesystem_configs_s3_mount_round_trip(lam):
     """FileSystemConfigs accept-and-echo: AWS added S3-bucket ARN support
     in 2026-04 alongside the original EFS access-point ARNs. The emulator

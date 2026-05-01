@@ -7,6 +7,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Lambda Docker endpoint/network opt-ins** — `LAMBDA_AUTO_AWS_ENDPOINT_URL=1` injects a sibling-reachable `AWS_ENDPOINT_URL` into Lambda Docker containers when no endpoint is already configured, and `LAMBDA_AUTO_DOCKER_NETWORK=1` attaches Lambda Docker containers to MiniStack's own Docker network when no explicit Docker network is set. Both flags are disabled by default.
+
+---
+
 ## [1.3.23] — 2026-05-01
 
 ### Added

@@ -41,7 +41,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from ministack.core.lambda_runtime import get_or_create_worker, invalidate_worker
 from ministack.core.persistence import PERSIST_STATE, load_state
@@ -63,6 +63,8 @@ LAMBDA_EXECUTOR = os.environ.get("LAMBDA_EXECUTOR", "local").lower()
 LAMBDA_DOCKER_VOLUME_MOUNT = os.environ.get("LAMBDA_REMOTE_DOCKER_VOLUME_MOUNT", "")
 LAMBDA_DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "") or os.environ.get("LAMBDA_DOCKER_NETWORK", "")
 LAMBDA_DOCKER_FLAGS = os.environ.get("LAMBDA_DOCKER_FLAGS", "")
+LAMBDA_AUTO_AWS_ENDPOINT_URL = os.environ.get("LAMBDA_AUTO_AWS_ENDPOINT_URL", "0").lower() in ("1", "true", "yes")
+LAMBDA_AUTO_DOCKER_NETWORK = os.environ.get("LAMBDA_AUTO_DOCKER_NETWORK", "0").lower() in ("1", "true", "yes")
 # LAMBDA_STRICT=1 → AWS-fidelity mode: every invocation must run in Docker via
 # the AWS RIE image (matching fzonneveld's "docker = docker, no fallbacks"
 # rule). When set, the warm-worker / local-subprocess fallbacks are disabled
@@ -80,6 +82,8 @@ except ImportError:
 
 _cached_docker_client = None
 _is_in_container: bool | None = None
+_cached_ministack_network: str | None = None
+_ministack_network_resolved = False
 
 
 def _running_in_container() -> bool:
@@ -116,6 +120,38 @@ def _get_docker_client():
         return _cached_docker_client
     except Exception:
         return None
+
+
+def _get_ministack_network(client) -> str | None:
+    """Return MiniStack's Docker network, when it can be inferred locally."""
+    global _cached_ministack_network, _ministack_network_resolved
+    if _ministack_network_resolved:
+        return _cached_ministack_network
+
+    network = os.environ.get("DOCKER_NETWORK", "") or os.environ.get(
+        "LAMBDA_DOCKER_NETWORK", ""
+    )
+    if not network:
+        hostname = os.environ.get("HOSTNAME", "").strip()
+        if hostname:
+            try:
+                self_container = client.containers.get(hostname)
+                networks = self_container.attrs.get("NetworkSettings", {}).get("Networks", {})
+                network = next(iter(networks.keys()), "")
+            except Exception:
+                logger.debug("lambda docker: could not inspect MiniStack container network", exc_info=True)
+
+    _cached_ministack_network = network or None
+    _ministack_network_resolved = True
+    return _cached_ministack_network
+
+
+def _effective_lambda_docker_network(client) -> str:
+    if LAMBDA_DOCKER_NETWORK:
+        return LAMBDA_DOCKER_NETWORK
+    if LAMBDA_AUTO_DOCKER_NETWORK:
+        return _get_ministack_network(client) or ""
+    return ""
 
 _functions = AccountScopedDict()  # function_name -> FunctionRecord
 _layers = AccountScopedDict()  # layer_name -> {"versions": [...], "next_version": int}
@@ -1943,8 +1979,13 @@ def _invoke_rie(container, event: dict, timeout: int) -> dict:
             networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
             # Try Docker network first (container-to-container)
             container_ip = None
-            if LAMBDA_DOCKER_NETWORK:
-                container_ip = networks.get(LAMBDA_DOCKER_NETWORK, {}).get("IPAddress", "")
+            effective_network = LAMBDA_DOCKER_NETWORK
+            if not effective_network and LAMBDA_AUTO_DOCKER_NETWORK:
+                docker_client = _get_docker_client()
+                if docker_client is not None:
+                    effective_network = _effective_lambda_docker_network(docker_client)
+            if effective_network:
+                container_ip = networks.get(effective_network, {}).get("IPAddress", "")
             if not container_ip and _running_in_container():
                 # DinD: host-mapped ports aren't reachable from inside this container.
                 # Use the Lambda container's IP on any available Docker network.
@@ -2168,6 +2209,14 @@ def _spawn_lambda_container(config: dict, code_zip: bytes | None):
         endpoint = _normalize_endpoint_url(env_vars.get("AWS_ENDPOINT_URL", ""))
     if not endpoint:
         endpoint = _normalize_endpoint_url(env_vars.get("LOCALSTACK_HOSTNAME", ""))
+    auto_endpoint = False
+    if not endpoint and LAMBDA_AUTO_AWS_ENDPOINT_URL:
+        fallback_host = os.environ.get("MINISTACK_HOST", "")
+        if not fallback_host or fallback_host == "localhost":
+            fallback_host = "host.docker.internal"
+        fallback_port = os.environ.get("GATEWAY_PORT") or os.environ.get("EDGE_PORT") or "4566"
+        endpoint = f"http://{fallback_host}:{fallback_port}"
+        auto_endpoint = True
     if endpoint:
         container_env["AWS_ENDPOINT_URL"] = endpoint
 
@@ -2215,8 +2264,13 @@ def _spawn_lambda_container(config: dict, code_zip: bytes | None):
 
     if mounts:
         run_kwargs["mounts"] = mounts
-    if LAMBDA_DOCKER_NETWORK:
-        run_kwargs["network"] = LAMBDA_DOCKER_NETWORK
+    lambda_network = _effective_lambda_docker_network(client)
+    if lambda_network:
+        run_kwargs["network"] = lambda_network
+    if auto_endpoint and urlparse(endpoint).hostname == "host.docker.internal":
+        run_kwargs.setdefault("extra_hosts", {})
+        if isinstance(run_kwargs["extra_hosts"], dict):
+            run_kwargs["extra_hosts"].setdefault("host.docker.internal", "host-gateway")
 
     # Apply LAMBDA_DOCKER_FLAGS — merge parsed kwargs into run_kwargs
     if LAMBDA_DOCKER_FLAGS:
