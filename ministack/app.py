@@ -1197,6 +1197,24 @@ async def _handle_lifespan(scope, receive, send):
                 await transfer.sftp_start()
             except Exception as e:
                 logger.warning("Transfer SFTP startup failed: %s", e)
+            try:
+                from ministack.services import dns_resolver
+
+                if dns_resolver.resolver_enabled():
+                    ip_bytes = dns_resolver.resolve_ministack_dns_answer_ip()
+                    if ip_bytes:
+                        logger.info(
+                            "MiniStack wildcard DNS A records -> %s",
+                            socket.inet_ntoa(ip_bytes),
+                        )
+                    started = await dns_resolver.start_dns_resolver(ip_bytes)
+                    if not started:
+                        logger.warning(
+                            "MiniStack DNS resolver did not bind (check UDP port "
+                            "permissions or set MINISTACK_DNS_PORT)."
+                        )
+            except Exception as e:
+                logger.warning("DNS resolver startup failed: %s", e)
             await send({"type": "lifespan.startup.complete"})
             logger.info("Ready.")
             for svc in SERVICE_HANDLERS:
@@ -1204,6 +1222,12 @@ async def _handle_lifespan(scope, receive, send):
             asyncio.create_task(_run_ready_scripts())
         elif message["type"] == "lifespan.shutdown":
             logger.info("MiniStack shutting down...")
+            try:
+                from ministack.services import dns_resolver
+
+                await dns_resolver.stop_dns_resolver()
+            except Exception as e:
+                logger.debug("DNS resolver shutdown: %s", e)
             if PERSIST_STATE:
                 # Only save state for modules that were actually loaded
                 save_dict = {}

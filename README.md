@@ -678,6 +678,14 @@ ecs.stop_task(cluster="dev", task=task_arn)
 | `MINISTACK_SSL_CERT` | _(unset)_ | Optional PEM-encoded server certificate path; required together with `MINISTACK_SSL_KEY`. When unset, MiniStack auto-generates a self-signed cert under `${TMPDIR}/ministack-tls/` (cached across restarts) |
 | `MINISTACK_SSL_KEY` | _(unset)_ | Optional PEM-encoded private key path; required together with `MINISTACK_SSL_CERT` |
 | `MINISTACK_IMDS_V2_REQUIRED` | `0` | Reject token-less GETs on `/latest/meta-data/...`. When set, callers must first `PUT /latest/api/token` and pass the token as `X-aws-ec2-metadata-token`, matching real-AWS hop-limit-1 IMDSv2-only instances |
+| `MINISTACK_DNS_RESOLVER` | `0` | Set to `1`/`true`/`yes`/`on` to start the opt-in UDP wildcard DNS resolver for AWS-shaped local hostnames inside Docker networks |
+| `MINISTACK_DNS_PORT` | `53` | UDP port for the wildcard DNS resolver when `MINISTACK_DNS_RESOLVER` is enabled |
+
+### Wildcard DNS
+
+When `MINISTACK_DNS_RESOLVER=1`, MiniStack starts an opt-in UDP resolver for Docker-based clients that need AWS-shaped local hostnames to resolve back to the MiniStack container. The resolver is generic by design; the initial zones are AppSync Events hostnames such as `*.appsync-api.<region>.<host>` and `*.appsync-realtime-api.<region>.<host>`.
+
+Publish the configured UDP port if clients need to query it from outside the container. The resolver answers matching wildcard zones with MiniStack's IPv4 address on its Docker network and forwards all other queries to upstream resolvers from `/etc/resolv.conf`. Future AWS-shaped local service hostnames can be added by extending the zone suffix list without changing the DNS protocol handling.
 
 ### API Gateway HTTP proxy execution model
 

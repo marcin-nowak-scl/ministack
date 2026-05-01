@@ -7,6 +7,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Optional wildcard DNS resolver** — `MINISTACK_DNS_RESOLVER=1` starts an opt-in UDP resolver for AWS-shaped local hostnames inside Docker networks. The resolver is generic by design; the initial zones cover AppSync Events hostnames such as `*.appsync-api.<region>.<host>` and `*.appsync-realtime-api.<region>.<host>`. It answers matching zones with MiniStack's Docker-network IPv4 address, forwards unrelated queries upstream, and remains disabled by default.
+
+---
+
 ## [1.3.23] — 2026-05-01
 
 ### Added
