@@ -237,8 +237,9 @@ SERVICE_PATTERNS = {
         "credential_scope": "appsync",
     },
     # AppSync Events data plane: HTTP publish lives on
-    # {apiId}.appsync-api.<host>; management shares the "appsync"
-    # credential scope and is delegated from services/appsync.py.
+    # {apiId}.appsync-api.{region}.{host}; realtime WebSocket lives on
+    # {apiId}.appsync-realtime-api.{region}.{host}. Management shares the
+    # "appsync" credential scope and is delegated from services/appsync.py.
     "appsync-events": {
         "host_patterns": [r"appsync-api\.", r"appsync-realtime-api\."],
     },
@@ -306,9 +307,10 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
                 if target.startswith(prefix):
                     return svc
 
-    # AppSync Events HTTP publish: POST /event on {apiId}.appsync-api.<host>.
-    # AWS SDKs sign these requests with the legacy "appsync" credential scope,
-    # so the data-plane host/path must win before credential-scope routing.
+    # AppSync Events HTTP publish: POST /event on
+    # {apiId}.appsync-api.{region}.{host}. AWS SDKs sign these requests with
+    # the legacy "appsync" credential scope, so the data-plane host/path must
+    # win before credential-scope routing.
     if method == "POST" and path == "/event" and re.search(r"\.appsync-api\.", host):
         return "appsync-events"
 

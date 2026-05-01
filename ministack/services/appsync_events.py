@@ -4,13 +4,15 @@ Supports: CreateApi, GetApi, ListApis, UpdateApi, DeleteApi,
           CreateChannelNamespace, GetChannelNamespace, ListChannelNamespaces,
           UpdateChannelNamespace, DeleteChannelNamespace,
           CreateApiKey, ListApiKeys, DeleteApiKey,
-          Publish (HTTP POST /event on {apiId}.appsync-api.<host>),
-          WebSocket subscribe (wss://{apiId}.appsync-realtime-api.<host>/event/realtime,
+          Publish (HTTP POST /event on {apiId}.appsync-api.{region}.{host}),
+          WebSocket subscribe (wss://{apiId}.appsync-realtime-api.{region}.{host}/event/realtime,
           aws-appsync-event-ws subprotocol: connection_init, subscribe,
           unsubscribe, publish, server-pushed data + ka keep-alives).
-Management plane is REST/JSON under /v2/apis (shares the ``appsync`` credential
-scope). Channel paths validated against the 1..5-segment spec regex; subscribe
-patterns accept a trailing ``*`` single-level wildcard. Connection-scoped
+Event API management is REST/JSON under /v2/apis (shares the ``appsync``
+credential scope); API key operations use the AWS SDK's /v1/apis/{apiId}/apikeys
+path and are delegated from ``services/appsync.py``. Channel paths validated
+against the 1..5-segment spec regex; subscribe patterns accept a trailing
+``*`` single-level wildcard. Connection-scoped
 authorization is sent via a second ``header-<base64url(json)>`` subprotocol
 entry and cached for later subscribe/publish frames. Set
 ``APPSYNC_EVENTS_ENFORCE_AUTH=1`` for strict mode: without an ``AWS_LAMBDA``
@@ -20,8 +22,8 @@ in the API ``eventConfig``, the named Lambda is invoked (connect + subscribe +
 publish) with the same ``AuthorizationToken`` / ``Channel`` / ``Operation``
 shape as on AWS. By default ``CreateApi`` / ``GetApi`` return ``dns`` hostnames of
 the form ``{apiId}.appsync-api.{region}.{MINISTACK_HOST}:{port}`` and
-``{apiId}.appsync-realtime-api.{region}.{MINISTACK_HOST}:{port}`` (live AWS shape
-with ``localhost`` instead of ``amazonaws.com``, plus explicit ``GATEWAY_PORT``).
+``{apiId}.appsync-realtime-api.{region}.{MINISTACK_HOST}:{port}`` (AWS-style
+service labels with a local base host and explicit ``GATEWAY_PORT``).
 Optional: ``APPSYNC_EVENTS_HTTP_HOST_TEMPLATE`` and
 ``APPSYNC_EVENTS_REALTIME_HOST_TEMPLATE`` (``{api_id}``, ``{region}``, ``{port}``)
 override those defaults when **both** are set.
@@ -479,8 +481,9 @@ def _auth_from_headers(headers: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def handle_request(method, path, headers, body, query_params):
-    # HTTP publish lives on a separate host ({apiId}.appsync-api.*) and the
-    # path is always "/event" — dispatch it before the management router.
+    # HTTP publish lives on a separate host:
+    # {apiId}.appsync-api.{region}.{host}, with a fixed "/event" path.
+    # Dispatch it before the management router.
     host = headers.get("host", "")
     host_match = _APPSYNC_API_HOST_RE.match(host)
     if host_match and path == "/event" and method == "POST":
