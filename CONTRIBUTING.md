@@ -23,9 +23,12 @@ ministack/
 ├── pyproject.toml
 └── CHANGELOG.md
 ```
+-----
+## For infrastructure changes (Dockerfiles, CI/CD, pyproject, dependencies), open an issue first. PRs containing such changes without a prior issue will be rejected. 
 
 ## FOR NEW SERVICES — Open an Issue First
-## For infrastructure changes (Dockerfiles, CI/CD, pyproject, dependencies), open an issue first. PRs containing such changes without a prior issue will be rejected. 
+
+
 
 > **This section applies only when you are adding a brand-new AWS service** (a new file under `ministack/services/`).
 
